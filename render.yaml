@@ -2,8 +2,9 @@ services:
   - type: web
     name: face-recognition-server
     runtime: python
-    region: oregon
+    region: singapore
     plan: free
+    branch: main
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
@@ -13,3 +14,5 @@ services:
         value: 3.11.9
       - key: PYTHONUNBUFFERED
         value: true
+    healthCheckPath: /health
+    autoDeploy: true
