@@ -1,23 +1,10 @@
 services:
   - type: web
     name: face-recognition-server
-    runtime: python
+    runtime: docker  # Changed from 'python' to 'docker'
     region: singapore
     plan: free
-    buildCommand: |
-      # Install system dependencies
-      apt-get update && apt-get install -y \
-        libwebp-dev \
-        libwebp7 \
-        libwebpdemux2 \
-        libwebpmux3 \
-        cmake \
-        build-essential
-      
-      # Then install Python packages
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: gunicorn server:app --timeout 120 --workers 1 --threads 2
+    dockerfilePath: ./Dockerfile  # Path to your Dockerfile
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
