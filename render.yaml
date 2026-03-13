@@ -4,8 +4,17 @@ services:
     runtime: python
     region: singapore
     plan: free
-    branch: main
     buildCommand: |
+      # Install system dependencies
+      apt-get update && apt-get install -y \
+        libwebp-dev \
+        libwebp7 \
+        libwebpdemux2 \
+        libwebpmux3 \
+        cmake \
+        build-essential
+      
+      # Then install Python packages
       pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: gunicorn server:app --timeout 120 --workers 1 --threads 2
@@ -14,5 +23,3 @@ services:
         value: 3.11.9
       - key: PYTHONUNBUFFERED
         value: true
-    healthCheckPath: /health
-    autoDeploy: true
