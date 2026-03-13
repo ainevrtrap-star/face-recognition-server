@@ -1,10 +1,13 @@
-flask
-flask-cors
-dlib
-opencv-python
-numpy
-pymongo
-requests
-pandas
-gunicorn
-pillow
+# Use pre-compiled dlib wheel (no compilation needed)
+dlib @ https://github.com/alvinregin/dlib-wheels/releases/download/v20.0.0/dlib-20.0.0-cp311-cp311-linux_x86_64.whl
+
+# Other dependencies
+flask==2.3.3
+flask-cors==4.0.0
+opencv-python==4.8.1.78
+numpy==1.24.3
+pymongo==4.5.0
+requests==2.31.0
+pandas==2.0.3
+gunicorn==21.2.0
+pillow==10.0.1
