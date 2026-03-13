@@ -1,332 +1,422 @@
-"""
-Face Recognition Server for Render
-This server uses dlib for face recognition and connects to MongoDB
-"""
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import dlib
 import numpy as np
+import dlib
 import cv2
 import os
 import base64
-import logging
-from pymongo import MongoClient
 import datetime
+from pymongo import MongoClient
+import logging
 import json
-import tempfile
+import pandas as pd
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Android app
+CORS(app)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Get the directory where this script is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-logger.info(f"Base directory: {BASE_DIR}")
+print(f"[+] Server Base Directory: {BASE_DIR}")
 
-# Check for models in data/data_dlib folder
-models_dir = os.path.join(BASE_DIR, 'data', 'data_dlib')
-predictor_path = os.path.join(models_dir, 'shape_predictor_68_face_landmarks.dat')
-face_reco_model_path = os.path.join(models_dir, 'dlib_face_recognition_resnet_model_v1.dat')
+# Initialize Dlib models with correct paths from your structure
+detector = dlib.get_frontal_face_detector()
 
-logger.info(f"Looking for models in: {models_dir}")
+# Path to model files in your data/data_dlib structure
+predictor_path = os.path.join(BASE_DIR, 'data', 'data_dlib', 'shape_predictor_68_face_landmarks.dat')
+face_reco_model_path = os.path.join(BASE_DIR, 'data', 'data_dlib', 'dlib_face_recognition_resnet_model_v1.dat')
+csv_features_path = os.path.join(BASE_DIR, 'data', 'features_all.csv')
 
+print(f"[+] Looking for predictor at: {predictor_path}")
+print(f"[+] Looking for model at: {face_reco_model_path}")
+print(f"[+] Looking for CSV at: {csv_features_path}")
+
+# Check if model files exist
 if not os.path.exists(predictor_path):
-    logger.error(f"Shape predictor not found at: {predictor_path}")
-    # Also check in current directory as fallback
-    alt_predictor = os.path.join(BASE_DIR, 'shape_predictor_68_face_landmarks.dat')
-    if os.path.exists(alt_predictor):
-        logger.info(f"Found shape predictor at: {alt_predictor}")
-        predictor_path = alt_predictor
-    else:
-        raise FileNotFoundError(f"shape_predictor_68_face_landmarks.dat not found in {models_dir} or {BASE_DIR}")
+    print(f"[-] ERROR: Predictor file not found at {predictor_path}")
+    print("[+] Make sure shape_predictor_68_face_landmarks.dat is in data/data_dlib/")
+    exit(1)
 
 if not os.path.exists(face_reco_model_path):
-    logger.error(f"Face recognition model not found at: {face_reco_model_path}")
-    # Also check in current directory as fallback
-    alt_model = os.path.join(BASE_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
-    if os.path.exists(alt_model):
-        logger.info(f"Found face recognition model at: {alt_model}")
-        face_reco_model_path = alt_model
-    else:
-        raise FileNotFoundError(f"dlib_face_recognition_resnet_model_v1.dat not found in {models_dir} or {BASE_DIR}")
+    print(f"[-] ERROR: Model file not found at {face_reco_model_path}")
+    print("[+] Make sure dlib_face_recognition_resnet_model_v1.dat is in data/data_dlib/")
+    exit(1)
 
-logger.info(f"Using predictor: {predictor_path}")
-logger.info(f"Using model: {face_reco_model_path}")
+# Load the models
+predictor = dlib.shape_predictor(predictor_path)
+face_reco_model = dlib.face_recognition_model_v1(face_reco_model_path)
 
-# Initialize dlib models
+# MongoDB Connection
+MONGO_URI = "mongodb+srv://hiraiginjialt4_db_user:l2CDwnX4pQdcEvI7@cluster0.sjtehir.mongodb.net/attendance_system?retryWrites=true&w=majority"
 try:
-    detector = dlib.get_frontal_face_detector()
-    predictor = dlib.shape_predictor(predictor_path)
-    face_reco_model = dlib.face_recognition_model_v1(face_reco_model_path)
-    logger.info("✅ Dlib models loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Error loading dlib models: {e}")
-    raise
-
-# MongoDB connection
-MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb+srv://hiraiginjialt4_db_user:l2CDwnX4pQdcEvI7@cluster0.sjtehir.mongodb.net/attendance_system?retryWrites=true&w=majority')
-
-try:
-    mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     # Test connection
     mongo_client.admin.command('ping')
     db = mongo_client["attendance_system"]
     employee_faces_collection = db["employee_faces"]
     attendance_collection = db["attendance_records"]
-    logger.info("✅ Connected to MongoDB successfully")
+    print("[+] Connected to MongoDB successfully")
 except Exception as e:
-    logger.error(f"❌ MongoDB connection failed: {e}")
-    # Continue without MongoDB - will use local memory
+    print(f"[-] MongoDB connection failed: {e}")
+    print("[+] Continuing with local CSV only")
+    mongo_client = None
     employee_faces_collection = None
     attendance_collection = None
 
-# Load known faces into memory
+# Load known faces into memory on server start
 face_features_known = []
 face_names_known = []
-last_load_time = None
-
-def load_known_faces():
-    """Load all known faces from MongoDB into memory"""
-    global face_features_known, face_names_known, last_load_time
-    
-    if employee_faces_collection is None:
-        logger.warning("⚠️ MongoDB not available, using empty face database")
-        face_features_known = []
-        face_names_known = []
-        return 0
-    
-    try:
-        employees = employee_faces_collection.find({})
-        count = 0
-        temp_features = []
-        temp_names = []
-        
-        for emp in employees:
-            # Try different possible field names
-            name = emp.get('name') or emp.get('employee_name') or emp.get('full_name') or 'Unknown'
-            features = emp.get('features') or emp.get('face_features') or []
-            
-            if features and len(features) == 128:
-                # Convert to float array
-                feature_array = [float(f) for f in features]
-                temp_names.append(name)
-                temp_features.append(feature_array)
-                count += 1
-                logger.info(f"  Loaded: {name}")
-            else:
-                logger.warning(f"  Invalid features for {name}: {len(features)} features")
-        
-        face_features_known = temp_features
-        face_names_known = temp_names
-        last_load_time = datetime.datetime.now()
-        
-        logger.info(f"✅ Successfully loaded {count} known faces")
-        return count
-        
-    except Exception as e:
-        logger.error(f"❌ Error loading faces: {e}")
-        return 0
-
-# Load faces on startup
-load_known_faces()
 
 def return_euclidean_distance(feature_1, feature_2):
-    """Calculate Euclidean distance between two face features"""
+    """Compute Euclidean distance between two feature vectors"""
     feature_1 = np.array(feature_1)
     feature_2 = np.array(feature_2)
     dist = np.sqrt(np.sum(np.square(feature_1 - feature_2)))
-    return float(dist)
+    return dist
 
-def process_image(base64_image):
-    """Convert base64 image to numpy array"""
+def load_from_csv():
+    """Load face features from local CSV file"""
+    global face_features_known, face_names_known
+    
     try:
-        # Remove data URL prefix if present
-        if ',' in base64_image:
-            base64_image = base64_image.split(',')[1]
+        if not os.path.exists(csv_features_path):
+            print(f"[-] CSV file not found at {csv_features_path}")
+            return 0
         
-        # Decode base64
-        image_bytes = base64.b64decode(base64_image)
+        print("[+] Loading face features from local CSV...")
         
-        # Convert to numpy array
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # Read CSV file
+        csv_rd = pd.read_csv(csv_features_path, header=None)
         
-        if img is None:
-            logger.error("Failed to decode image")
-            return None
+        if csv_rd.shape[0] == 0:
+            print("[-] CSV file has no rows")
+            return 0
         
-        return img
+        loaded_count = 0
+        for i in range(csv_rd.shape[0]):
+            try:
+                name = str(csv_rd.iloc[i][0])
+                features_someone_arr = []
+                
+                # Check if name is valid
+                if not name or pd.isna(name) or name == 'nan':
+                    print(f"[-] Invalid name at row {i}")
+                    continue
+                
+                # Extract 128 features
+                valid_row = True
+                for j in range(1, 129):
+                    value = csv_rd.iloc[i][j]
+                    if pd.isna(value) or value == '':
+                        features_someone_arr.append(0.0)
+                        valid_row = False
+                    else:
+                        try:
+                            features_someone_arr.append(float(value))
+                        except:
+                            features_someone_arr.append(0.0)
+                            valid_row = False
+                
+                if valid_row and len(features_someone_arr) == 128:
+                    face_names_known.append(name)
+                    face_features_known.append(features_someone_arr)
+                    loaded_count += 1
+                    print(f"[+] Loaded from CSV: {name}")
+                else:
+                    print(f"[-] Invalid features for {name} at row {i}")
+                    
+            except Exception as e:
+                print(f"[-] Error processing row {i} in CSV: {e}")
+        
+        print(f"[+] Successfully loaded {loaded_count} faces from local CSV")
+        return loaded_count
+        
     except Exception as e:
-        logger.error(f"Error processing image: {e}")
-        return None
+        print(f"[-] Error loading from CSV: {e}")
+        return 0
 
-@app.route('/')
-def home():
-    """Home endpoint"""
-    return jsonify({
-        "status": "online",
-        "service": "Face Recognition Server",
-        "faces_loaded": len(face_names_known),
-        "mongodb": employee_faces_collection is not None,
-        "models_loaded": True
-    })
+def load_from_mongodb():
+    """Load face features from MongoDB"""
+    global face_features_known, face_names_known
+    
+    if employee_faces_collection is None:
+        return 0
+    
+    try:
+        print("[+] Loading face features from MongoDB...")
+        employee_records = employee_faces_collection.find({})
+        
+        mongo_count = 0
+        for record in employee_records:
+            try:
+                name = record.get('name', 'Unknown')
+                if not name or name == 'Unknown':
+                    name = record.get('employee_name', 'Unknown')
+                
+                features = record.get('features', [])
+                
+                if features and len(features) == 128:
+                    features_arr = [float(f) for f in features]
+                    face_names_known.append(name)
+                    face_features_known.append(features_arr)
+                    mongo_count += 1
+                    print(f"[+] Loaded from MongoDB: {name}")
+                else:
+                    print(f"[-] Invalid features for {name}")
+            except Exception as e:
+                print(f"[-] Error processing MongoDB record: {e}")
+        
+        print(f"[+] Successfully loaded {mongo_count} faces from MongoDB")
+        return mongo_count
+        
+    except Exception as e:
+        print(f"[-] Error loading from MongoDB: {e}")
+        return 0
+
+def load_known_faces():
+    """Load all known faces from database (MongoDB first, then CSV fallback)"""
+    global face_features_known, face_names_known
+    face_features_known = []
+    face_names_known = []
+    
+    total_loaded = 0
+    
+    # Try MongoDB first if available
+    if employee_faces_collection is not None:
+        total_loaded = load_from_mongodb()
+    
+    # If MongoDB failed or returned 0, try CSV
+    if total_loaded == 0:
+        print("[+] Falling back to local CSV...")
+        total_loaded = load_from_csv()
+    
+    print(f"[+] Total faces loaded: {total_loaded}")
+    return total_loaded
+
+# Load faces on startup
+load_known_faces()
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
-        "status": "healthy",
+        "status": "healthy", 
         "faces_loaded": len(face_names_known),
-        "timestamp": datetime.datetime.now().isoformat(),
-        "mongodb": employee_faces_collection is not None
+        "mongodb": "connected" if mongo_client else "disconnected",
+        "faces": face_names_known  # List all loaded faces
     })
 
 @app.route('/recognize', methods=['POST'])
 def recognize_face():
-    """Main face recognition endpoint"""
+    """Receive image from client and recognize faces"""
     try:
-        # Get image from request
         data = request.json
         if not data or 'image' not in data:
             return jsonify({"error": "No image provided"}), 400
         
-        # Process image
-        img = process_image(data['image'])
+        # Decode base64 image
+        image_data = data['image']
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
+        
+        try:
+            nparr = np.frombuffer(base64.b64decode(image_data), np.uint8)
+        except Exception as e:
+            return jsonify({"error": f"Invalid base64 encoding: {e}"}), 400
+        
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
         if img is None:
-            return jsonify({"error": "Invalid image"}), 400
+            return jsonify({"error": "Invalid image data"}), 400
+        
+        # Convert to RGB (Dlib expects RGB)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         # Detect faces
-        faces = detector(img, 1)  # Upsample once for better detection
+        faces = detector(img_rgb, 0)
         
         if len(faces) == 0:
-            return jsonify({
-                "faces_detected": 0,
-                "matches": [],
-                "message": "No faces detected"
-            })
+            return jsonify({"faces": []})
         
         results = []
-        for i, face in enumerate(faces):
+        for face in faces:
             try:
-                # Get face landmarks and descriptor
-                shape = predictor(img, face)
-                face_descriptor = face_reco_model.compute_face_descriptor(img, shape)
+                # Get face features
+                shape = predictor(img_rgb, face)
+                face_features = face_reco_model.compute_face_descriptor(img_rgb, shape)
+                face_features_array = list(face_features)
                 
                 # Compare with known faces
-                best_match = None
-                min_distance = float('inf')
+                best_match = "Unknown"
+                min_distance = 0.4  # Threshold - lower is stricter
+                confidence = 0.0
                 
-                for j, known_features in enumerate(face_features_known):
-                    distance = return_euclidean_distance(face_descriptor, known_features)
+                for i, known_features in enumerate(face_features_known):
+                    distance = return_euclidean_distance(face_features_array, known_features)
                     if distance < min_distance:
                         min_distance = distance
-                        if distance < 0.4:  # Threshold for recognition
-                            best_match = face_names_known[j]
+                        best_match = face_names_known[i]
+                        confidence = 1.0 - distance  # Convert to confidence score
                 
-                # Get face location
-                face_location = {
-                    "left": int(face.left()),
-                    "top": int(face.top()),
-                    "right": int(face.right()),
-                    "bottom": int(face.bottom()),
-                    "width": int(face.width()),
-                    "height": int(face.height())
-                }
-                
-                confidence = 1 - (min_distance / 0.8) if min_distance < 0.8 else 0
+                # Get face coordinates
+                left, top, right, bottom = face.left(), face.top(), face.right(), face.bottom()
                 
                 results.append({
-                    "face_id": i + 1,
-                    "name": best_match if best_match else "unknown",
-                    "confidence": round(max(0, confidence), 3),
-                    "distance": round(min_distance, 3),
-                    "location": face_location
+                    "name": best_match,
+                    "confidence": float(confidence),
+                    "distance": float(min_distance),
+                    "bbox": [left, top, right, bottom]
                 })
                 
-                logger.info(f"Face {i+1}: {results[-1]['name']} (confidence: {results[-1]['confidence']})")
-                
             except Exception as e:
-                logger.error(f"Error processing face {i}: {e}")
+                print(f"[-] Error processing individual face: {e}")
                 continue
         
-        return jsonify({
-            "faces_detected": len(results),
-            "matches": results,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-        
+        return jsonify({"faces": results})
+    
     except Exception as e:
-        logger.error(f"Recognition error: {e}")
+        logging.error(f"Recognition error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/attendance', methods=['POST'])
 def record_attendance():
-    """Record attendance in database"""
+    """Record attendance from client"""
     try:
         data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-        
         name = data.get('name')
-        action = data.get('action', 'clock_in')
-        timestamp = data.get('timestamp', datetime.datetime.now().isoformat())
+        action = data.get('action')  # 'in' or 'out'
         
-        if not name:
-            return jsonify({"error": "Name is required"}), 400
+        if not name or not action:
+            return jsonify({"error": "Missing required fields"}), 400
         
-        # Store in MongoDB if available
+        # Get current time
+        now = datetime.datetime.now()
+        timestamp = now.isoformat()
+        date = now.strftime('%Y-%m-%d')
+        time_str = now.strftime('%H:%M:%S')
+        
+        # If MongoDB is available, use it
         if attendance_collection is not None:
-            attendance_record = {
+            # Check if record exists for today
+            existing = attendance_collection.find_one({
                 "name": name,
-                "action": action,
-                "timestamp": timestamp,
-                "source": "android_app",
-                "created_at": datetime.datetime.now()
-            }
+                "date": date
+            })
             
-            result = attendance_collection.insert_one(attendance_record)
-            record_id = str(result.inserted_id)
-            logger.info(f"✅ Attendance recorded in MongoDB: {name} - {action}")
-        else:
-            record_id = "local_only"
-            logger.info(f"📝 Attendance recorded locally: {name} - {action}")
+            if action == 'in':
+                if existing:
+                    return jsonify({
+                        "message": "Already clocked in", 
+                        "record": {
+                            "name": name,
+                            "clock_in_time": existing.get('clock_in_time'),
+                            "date": date
+                        }
+                    }), 200
+                else:
+                    record = {
+                        "name": name,
+                        "clock_in_time": time_str,
+                        "clock_out_time": None,
+                        "date": date,
+                        "timestamp": now,
+                        "device_id": data.get('device_id', 'unknown'),
+                        "location": data.get('location', 'unknown')
+                    }
+                    result = attendance_collection.insert_one(record)
+                    record['_id'] = str(result.inserted_id)
+                    return jsonify({
+                        "message": "Clocked in successfully", 
+                        "record": record
+                    }), 201
+            
+            elif action == 'out':
+                if existing:
+                    attendance_collection.update_one(
+                        {"_id": existing["_id"]},
+                        {"$set": {"clock_out_time": time_str}}
+                    )
+                    existing["clock_out_time"] = time_str
+                    existing['_id'] = str(existing['_id'])
+                    return jsonify({
+                        "message": "Clocked out successfully", 
+                        "record": existing
+                    }), 200
+                else:
+                    return jsonify({"error": "No clock-in record found for today"}), 404
         
+        # If MongoDB is not available, return success anyway (client can store locally)
         return jsonify({
-            "status": "success",
-            "message": f"{action} recorded for {name}",
-            "record_id": record_id
-        })
-        
+            "message": f"Attendance {action} recorded (offline mode)",
+            "name": name,
+            "time": time_str,
+            "date": date
+        }), 200
+    
     except Exception as e:
-        logger.error(f"Error recording attendance: {e}")
+        logging.error(f"Attendance error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/reload_faces', methods=['POST'])
+@app.route('/faces/reload', methods=['POST'])
 def reload_faces():
     """Reload known faces from database"""
-    try:
-        count = load_known_faces()
-        return jsonify({
-            "status": "success",
-            "faces_loaded": count,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Error reloading faces: {e}")
-        return jsonify({"error": str(e)}), 500
+    count = load_known_faces()
+    return jsonify({"message": f"Reloaded {count} faces", "count": count})
 
-@app.route('/faces', methods=['GET'])
+@app.route('/faces/list', methods=['GET'])
 def list_faces():
     """List all known faces"""
     return jsonify({
-        "total": len(face_names_known),
-        "faces": face_names_known,
-        "last_load": last_load_time.isoformat() if last_load_time else None
+        "count": len(face_names_known),
+        "faces": face_names_known
     })
+
+@app.route('/faces/add', methods=['POST'])
+def add_face():
+    """Add a new face to the database"""
+    try:
+        data = request.json
+        name = data.get('name')
+        features = data.get('features')
+        
+        if not name or not features:
+            return jsonify({"error": "Missing name or features"}), 400
+        
+        if len(features) != 128:
+            return jsonify({"error": "Features must be 128-dimensional"}), 400
+        
+        # Add to MongoDB if available
+        if employee_faces_collection is not None:
+            # Check if face already exists
+            existing = employee_faces_collection.find_one({"name": name})
+            if existing:
+                # Update existing
+                employee_faces_collection.update_one(
+                    {"name": name},
+                    {"$set": {"features": features, "updated_at": datetime.datetime.now()}}
+                )
+                message = f"Updated face for {name}"
+            else:
+                # Insert new
+                employee_faces_collection.insert_one({
+                    "name": name,
+                    "features": features,
+                    "created_at": datetime.datetime.now()
+                })
+                message = f"Added face for {name}"
+            
+            # Reload faces
+            load_known_faces()
+            
+            return jsonify({"message": message}), 200
+        else:
+            return jsonify({"error": "MongoDB not available"}), 503
+            
+    except Exception as e:
+        logging.error(f"Add face error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

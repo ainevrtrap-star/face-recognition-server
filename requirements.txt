@@ -1,7 +1,10 @@
-Flask==2.3.3
-Flask-CORS==4.0.0
-numpy==1.24.3
-opencv-python-headless==4.8.1.78
-pymongo==4.5.0
-gunicorn==21.2.0
-dlib==19.24.2
+flask
+flask-cors
+dlib
+opencv-python
+numpy
+pymongo
+requests
+pandas
+gunicorn
+pillow
