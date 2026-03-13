@@ -27,26 +27,44 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 logger.info(f"Base directory: {BASE_DIR}")
 
-# Check if model files exist
-predictor_path = os.path.join(BASE_DIR, 'shape_predictor_68_face_landmarks.dat')
-face_reco_model_path = os.path.join(BASE_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
+# Check for models in data/data_dlib folder
+models_dir = os.path.join(BASE_DIR, 'data', 'data_dlib')
+predictor_path = os.path.join(models_dir, 'shape_predictor_68_face_landmarks.dat')
+face_reco_model_path = os.path.join(models_dir, 'dlib_face_recognition_resnet_model_v1.dat')
+
+logger.info(f"Looking for models in: {models_dir}")
 
 if not os.path.exists(predictor_path):
     logger.error(f"Shape predictor not found at: {predictor_path}")
-    raise FileNotFoundError(f"shape_predictor_68_face_landmarks.dat not found")
+    # Also check in current directory as fallback
+    alt_predictor = os.path.join(BASE_DIR, 'shape_predictor_68_face_landmarks.dat')
+    if os.path.exists(alt_predictor):
+        logger.info(f"Found shape predictor at: {alt_predictor}")
+        predictor_path = alt_predictor
+    else:
+        raise FileNotFoundError(f"shape_predictor_68_face_landmarks.dat not found in {models_dir} or {BASE_DIR}")
 
 if not os.path.exists(face_reco_model_path):
     logger.error(f"Face recognition model not found at: {face_reco_model_path}")
-    raise FileNotFoundError(f"dlib_face_recognition_resnet_model_v1.dat not found")
+    # Also check in current directory as fallback
+    alt_model = os.path.join(BASE_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
+    if os.path.exists(alt_model):
+        logger.info(f"Found face recognition model at: {alt_model}")
+        face_reco_model_path = alt_model
+    else:
+        raise FileNotFoundError(f"dlib_face_recognition_resnet_model_v1.dat not found in {models_dir} or {BASE_DIR}")
+
+logger.info(f"Using predictor: {predictor_path}")
+logger.info(f"Using model: {face_reco_model_path}")
 
 # Initialize dlib models
 try:
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor(predictor_path)
     face_reco_model = dlib.face_recognition_model_v1(face_reco_model_path)
-    logger.info("Dlib models loaded successfully")
+    logger.info("✅ Dlib models loaded successfully")
 except Exception as e:
-    logger.error(f"Error loading dlib models: {e}")
+    logger.error(f"❌ Error loading dlib models: {e}")
     raise
 
 # MongoDB connection
@@ -59,9 +77,9 @@ try:
     db = mongo_client["attendance_system"]
     employee_faces_collection = db["employee_faces"]
     attendance_collection = db["attendance_records"]
-    logger.info("Connected to MongoDB successfully")
+    logger.info("✅ Connected to MongoDB successfully")
 except Exception as e:
-    logger.error(f"MongoDB connection failed: {e}")
+    logger.error(f"❌ MongoDB connection failed: {e}")
     # Continue without MongoDB - will use local memory
     employee_faces_collection = None
     attendance_collection = None
@@ -76,7 +94,7 @@ def load_known_faces():
     global face_features_known, face_names_known, last_load_time
     
     if employee_faces_collection is None:
-        logger.warning("MongoDB not available, using empty face database")
+        logger.warning("⚠️ MongoDB not available, using empty face database")
         face_features_known = []
         face_names_known = []
         return 0
@@ -98,19 +116,19 @@ def load_known_faces():
                 temp_names.append(name)
                 temp_features.append(feature_array)
                 count += 1
-                logger.info(f"Loaded: {name}")
+                logger.info(f"  Loaded: {name}")
             else:
-                logger.warning(f"Invalid features for {name}: {len(features)} features")
+                logger.warning(f"  Invalid features for {name}: {len(features)} features")
         
         face_features_known = temp_features
         face_names_known = temp_names
         last_load_time = datetime.datetime.now()
         
-        logger.info(f"Successfully loaded {count} known faces")
+        logger.info(f"✅ Successfully loaded {count} known faces")
         return count
         
     except Exception as e:
-        logger.error(f"Error loading faces: {e}")
+        logger.error(f"❌ Error loading faces: {e}")
         return 0
 
 # Load faces on startup
@@ -145,6 +163,17 @@ def process_image(base64_image):
     except Exception as e:
         logger.error(f"Error processing image: {e}")
         return None
+
+@app.route('/')
+def home():
+    """Home endpoint"""
+    return jsonify({
+        "status": "online",
+        "service": "Face Recognition Server",
+        "faces_loaded": len(face_names_known),
+        "mongodb": employee_faces_collection is not None,
+        "models_loaded": True
+    })
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -261,10 +290,10 @@ def record_attendance():
             
             result = attendance_collection.insert_one(attendance_record)
             record_id = str(result.inserted_id)
-            logger.info(f"Attendance recorded in MongoDB: {name} - {action}")
+            logger.info(f"✅ Attendance recorded in MongoDB: {name} - {action}")
         else:
             record_id = "local_only"
-            logger.info(f"Attendance recorded locally: {name} - {action}")
+            logger.info(f"📝 Attendance recorded locally: {name} - {action}")
         
         return jsonify({
             "status": "success",
